@@ -73,10 +73,17 @@ type Account struct {
 	// plan is Go, asked at /alpha/generate (commandcode_plan.go).
 	generate func(ctx context.Context) (key string, ok bool)
 
-	sign   func(ctx context.Context, req *http.Request, body []byte) error
-	body   func(body []byte) []byte // request tweaks the backend insists on
-	models func() []catalog.Model
-	fetch  func(ctx context.Context) ([]catalog.Model, error)
+	sign func(ctx context.Context, req *http.Request, body []byte) error
+	// recover renews the Codex credential a 401 was sent with, or reads a
+	// rotation already made for that same account (codex_recovery.go).
+	recover func(context.Context, codexSentAuth) (string, string, error)
+	// codexHome is set only for Codex's own credential store; a saved
+	// account keeps its credential in logins.json instead.
+	codexHome     string
+	codexIdentity codexIdentity
+	body          func(body []byte) []byte // request tweaks the backend insists on
+	models        func() []catalog.Model
+	fetch         func(ctx context.Context) ([]catalog.Model, error)
 	// magpieList is set on an account whose fetch asks no vendor and
 	// keeps a copy of models, magpie's own list (Claude's, from the
 	// models.dev catalog; Factory's, compiled in): the list served is
@@ -996,8 +1003,9 @@ var CodexBase = "https://chatgpt.com/backend-api/codex"
 var codexMu sync.Mutex
 
 type codexAuth struct {
-	AuthMode string `json:"auth_mode"`
-	Tokens   struct {
+	AuthMode    string          `json:"auth_mode"`
+	LastRefresh json.RawMessage `json:"last_refresh"`
+	Tokens      struct {
 		IDToken      string `json:"id_token"`
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
@@ -1028,6 +1036,14 @@ func codexAccount(home string) (Provider, bool) {
 		acct.User = codexLiveName(acct.User, bytes.TrimSpace(b))
 	}
 	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, dir) })
+	acct.codexHome = dir
+	acct.codexIdentity = codexIdentityOf(a)
+	acct.recover = func(ctx context.Context, sent codexSentAuth) (string, string, error) {
+		if !sent.matches(a) {
+			return "", "", errCodexAccountChanged
+		}
+		return recoverCodexToken(ctx, dir, sent)
+	}
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -1049,21 +1065,43 @@ func codexAccount(home string) (Provider, bool) {
 // sign-in (auth.json or the keychain item, codexStore.write) for Codex to
 // find.
 func codexToken(ctx context.Context, dir string) (tok, accountID string, err error) {
+	savedTokenMu.Lock()
+	defer savedTokenMu.Unlock()
 	codexMu.Lock()
 	defer codexMu.Unlock()
-	b, st, err := readCodexLogin(dir, false)
+	return codexTokenLocked(ctx, dir, "", nil)
+}
+
+// codexTokenLocked holds savedTokenMu and codexMu. Recovery reads the
+// store afresh and stays on sent's account; a concurrent rotation can be
+// used without spending its new refresh token again.
+func codexTokenLocked(ctx context.Context, dir string, reason codexRefreshReason, sent *codexSentAuth) (tok, accountID string, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	b, st, err := readCodexLogin(dir, sent != nil)
 	var a codexAuth
 	if err == nil && json.Unmarshal(b, &a) == nil && a.Tokens.AccessToken != "" {
-		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+		if sent != nil && !sent.matches(a) {
+			return "", "", errCodexAccountChanged
+		}
+		if sent != nil && a.Tokens.AccessToken != sent.token && !codexExpired(a) {
 			return a.Tokens.AccessToken, codexAccountID(a), nil
+		}
+		if reason == "" {
+			reason = codexRefreshDue(a, time.Now())
+			if reason == "" {
+				return a.Tokens.AccessToken, codexAccountID(a), nil
+			}
 		}
 		// about to be refreshed: the store's own, not a kept read, which
 		// Codex may have rotated since (its refresh token spent)
-		if st.keychain {
+		if st.keychain && sent == nil {
 			b, st, err = readCodexLogin(dir, true)
 			a = codexAuth{}
 			if err == nil && json.Unmarshal(b, &a) == nil && a.Tokens.AccessToken != "" {
-				if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+				reason = codexRefreshDue(a, time.Now())
+				if reason == "" {
 					return a.Tokens.AccessToken, codexAccountID(a), nil
 				}
 			}
@@ -1078,7 +1116,20 @@ func codexToken(ctx context.Context, dir string) (tok, accountID string, err err
 		return "", "", errors.New("Codex is signed out; run codex login")
 	}
 	accountID = codexAccountID(a)
-	tok, err = codexRefresh(ctx, raw)
+	tok, err = codexRefresh(ctx, raw, reason)
+	if err != nil {
+		if codexStillUsable(ctx, a, reason, err) {
+			return a.Tokens.AccessToken, accountID, nil
+		}
+		return "", "", err
+	}
+	// An external Codex process can sign in while the authority answers.
+	// Never overwrite that new identity with the rotation of the old one.
+	latest, _, rerr := readCodexLogin(dir, true)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	out, err := codexRotated(latest, b, raw)
 	if err != nil {
 		return "", "", err
 	}
@@ -1089,14 +1140,12 @@ func codexToken(ctx context.Context, dir string) (tok, accountID string, err err
 	// moment on Windows is waited out (#2239, #1505). A write that still
 	// fails loses the rotation, said in the log; the fresh access token in
 	// hand still serves this request.
-	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-		if werr := st.write(out); werr != nil {
-			where := st.file()
-			if st.keychain {
-				where = "the keychain item " + codexKeychainService
-			}
-			log.Printf("codex: the refreshed sign-in didn't reach %s: %v", where, werr)
+	if werr := st.write(out); werr != nil {
+		where := st.file()
+		if st.keychain {
+			where = "the keychain item " + codexKeychainService
 		}
+		log.Printf("codex: the refreshed sign-in didn't reach %s: %v", where, werr)
 	}
 	return tok, accountID, nil
 }
@@ -1111,7 +1160,7 @@ func codexAccountID(a codexAuth) string {
 
 // codexRefresh renews the tokens of an auth.json-shaped sign-in in place,
 // every other field left as it was, and returns the new access token.
-func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
+func codexRefresh(ctx context.Context, raw map[string]any, reason codexRefreshReason) (string, error) {
 	toks, _ := raw["tokens"].(map[string]any)
 	if toks == nil {
 		toks = map[string]any{}
@@ -1130,7 +1179,7 @@ func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
-		"refresh_token": refresh, "scope": "openid profile email"})
+		"refresh_token": refresh, "refresh_reason": string(reason)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -1148,7 +1197,7 @@ func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", refreshFailed(res.StatusCode, "Codex", "Codex is signed out (token refresh failed); run codex login")
+		return "", codexRefreshFailed(res.StatusCode, b)
 	}
 	toks["access_token"] = fresh.AccessToken
 	if fresh.IDToken != "" {
