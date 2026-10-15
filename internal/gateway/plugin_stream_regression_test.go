@@ -48,7 +48,10 @@ func pluginReplyGateway(t *testing.T, vendor http.Handler) (string, string, *htt
 		c, err := (&net.Dialer{}).DialContext(ctx, network, address)
 		if err == nil {
 			if tcp, ok := c.(*net.TCPConn); ok {
-				_ = tcp.SetReadBuffer(32 << 10)
+				// The paced reader supplies backpressure. A tiny TCP receive
+				// window can spend the test's deadline on window updates on
+				// Linux, even when that reader is not throttled.
+				_ = tcp.SetReadBuffer(1 << 20)
 			}
 		}
 		return c, err
