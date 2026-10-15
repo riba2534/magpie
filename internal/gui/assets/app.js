@@ -18301,8 +18301,8 @@ function setSetTab(tab, remember) {
   tabKeys(tabs, "button[data-set]");
   // the tabs held at the top (app.css, #2396): a hairline under them once
   // the page has scrolled beneath, as the Library's
-  const sv = $("#view-settings");
-  sv.addEventListener("scroll", () => sv.querySelector(":scope > .set-head").classList.toggle("stuck", sv.scrollTop > 0), { passive: true });
+  const sv = $("#view-settings"), head = sv.querySelector(":scope > .set-head");
+  sv.addEventListener("scroll", () => head.classList.toggle("stuck", sv.scrollTop > 0), { passive: true });
   // opened on a part (a reload, a link): that part, and remembered
   if (mode === "window" && params.get("view") === "settings" && SET_TABS.includes(params.get("tab"))) {
     setTab = params.get("tab");
