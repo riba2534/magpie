@@ -318,34 +318,36 @@ const (
 // at once (errKeychainWaiting) instead of waiting on the user.
 var keychainHold = 5 * time.Second
 
-// findCodexKeychain reads the item for home; fresh looks at the item now,
-// for a read whose tokens will be spent or saved, and asks again after a
-// refusal.
+// findCodexKeychain reads the item for home. Polling checks its date;
+// fresh reads the secret before spending tokens or replacing a sign-in.
+// mdat is only precise to a second, so an unchanged date cannot prove a
+// credential is still current. A fresh read may ask for permission again.
 func findCodexKeychain(home string, fresh bool) ([]byte, error) {
 	account := codexKeychainAccount(home)
+	if fresh {
+		return askCodexKeychain(account)
+	}
 	now := time.Now()
 	codexKeychainMu.Lock()
 	r, kept := codexKeychainCache[account]
 	switch {
 	case !kept:
 	case r.err == nil:
-		if !fresh && now.Sub(r.checked) < codexKeychainCheck {
+		if now.Sub(r.checked) < codexKeychainCheck {
 			codexKeychainMu.Unlock()
 			return r.b, nil
 		}
-		if !fresh {
-			// others go by it while this reader looks
-			r.checked = now
-			codexKeychainCache[account] = r
-		}
+		// others go by it while this reader looks
+		r.checked = now
+		codexKeychainCache[account] = r
 	case errors.Is(r.err, fs.ErrNotExist):
-		if !fresh && now.Sub(r.at) < codexKeychainCheck {
+		if now.Sub(r.at) < codexKeychainCheck {
 			codexKeychainMu.Unlock()
 			return nil, r.err
 		}
 		kept = false
 	default:
-		if !fresh && now.Sub(r.at) < codexKeychainRefused {
+		if now.Sub(r.at) < codexKeychainRefused {
 			codexKeychainMu.Unlock()
 			return nil, r.err
 		}
@@ -362,11 +364,11 @@ func findCodexKeychain(home string, fresh bool) ([]byte, error) {
 		case errors.Is(err, fs.ErrNotExist):
 			keepCodexKeychainRead(account, gen, r.at, codexKeychainRead{err: err, at: time.Now()})
 			return nil, err
-		case err != nil && !fresh:
+		case err != nil:
 			// not known whether it changed: the last read stands
 			return r.b, nil
 		}
-		// changed, or not known for a read that will be spent
+		// changed, or the item has no modification date
 	}
 	return askCodexKeychain(account)
 }

@@ -134,7 +134,7 @@ func TestCodexActiveRefreshRereadsAfterWaiting(t *testing.T) {
 	defer CodexTokenURLForTest(fake.URL)()
 	read := make(chan struct{})
 	codexKeychain = &codexReadNotice{keychain: codexKeychain, read: read}
-	forgetCodexKeychain()
+	resetCodexKeychain()
 	savedTokenMu.Lock()
 	var unlock sync.Once
 	release := func() { unlock.Do(savedTokenMu.Unlock) }
