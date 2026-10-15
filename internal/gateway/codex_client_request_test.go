@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -263,6 +264,9 @@ func TestCodexClientCapturedRequests(t *testing.T) {
 					t.Fatalf("asked %d times", len(calls))
 				}
 				sameCodexBody(t, calls[0].body, body)
+				if !bytes.Equal(calls[0].body, body) {
+					t.Errorf("native Codex bytes changed after routing: got %d bytes, want %d; model/stream field order and original escaping must survive", len(calls[0].body), len(body))
+				}
 				sameCodexClient(t, calls[0].head, head)
 				for k, want := range captured.Headers {
 					if k != "chatgpt-account-id" && calls[0].head.Get(k) != want {

@@ -665,8 +665,27 @@ func codexAccounts(r *http.Request, model string) (string, bool) {
 	return id, true
 }
 
-// withModel is a request body asking for another model.
+// withModel is a request body asking for another model. A unique string
+// field is replaced in place: Codex puts routing fields before its large
+// input, and neither their order nor the other fields' encoding changes.
+// Ambiguous fields still use the object rewrite below. A local replacement
+// of the first duplicate would leave a later model overriding the route.
 func withModel(body []byte, model string) []byte {
+	if top := gjson.ParseBytes(body); top.IsObject() && gjson.ValidBytes(body) {
+		models, stringModel := 0, false
+		top.ForEach(func(k, v gjson.Result) bool {
+			// encoding/json also accepts Model/MODEL when reading the
+			// request envelope. Keep their previous ordering semantics.
+			if strings.EqualFold(k.Str, "model") {
+				models++
+				stringModel = k.Str == "model" && v.Type == gjson.String
+			}
+			return models < 2
+		})
+		if models == 1 && stringModel {
+			return rewriteModel(body, model)
+		}
+	}
 	var q map[string]json.RawMessage
 	if json.Unmarshal(body, &q) != nil {
 		return body
