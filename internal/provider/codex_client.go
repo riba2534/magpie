@@ -131,11 +131,13 @@ func codexLiteBody(body []byte) bool {
 // clearCodexAccount removes the previous signer before another account
 // signs, even if its new token has no account id. Device attestation and
 // backend turn routing belong to that previous sign-in and are not proof
-// for this account. Match all spellings a relayed header can retain.
+// for this account. Other caller credentials, including gateway keys and
+// cookies, are not this account's either. Match every header spelling.
 func clearCodexAccount(h http.Header) {
 	for k := range h {
 		name := strings.ToLower(k)
 		if strings.Contains(name, "authorization") || name == "chatgpt-account-id" ||
+			name == "x-api-key" || name == "api-key" || name == "x-goog-api-key" || name == "cookie" ||
 			name == "x-oai-attestation" || name == "x-codex-turn-state" || name == "x-openai-codex-luna-reserve" {
 			delete(h, k)
 		}
