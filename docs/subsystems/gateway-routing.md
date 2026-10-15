@@ -120,11 +120,12 @@ a newer version observed on another request does not replace them. Explicit
 session and thread headers are kept independently, even when they differ
 from `prompt_cache_key`; the cache key supplies missing fields only. The
 chosen account always supplies Authorization and account ID. Re-signing
-removes prior authorization headers, device attestation, backend turn state
-and Luna Reserve state rather than transferring an account-bound proof to
-another account. This also applies to standalone search and a native
-compaction signed with a pool account. The native relay that does not change
-credentials retains its existing handling.
+removes prior authorization headers, caller API-key headers and cookies,
+device attestation, backend turn state and Luna Reserve state. Standalone
+search and a native compaction signed with a pool account use that same
+credential boundary; the latter also removes a caller gateway key from the
+outbound query, retaining its other parameters. The native relay that does
+not change credentials retains its existing handling.
 
 An IR translation or a local compaction summary is a payload magpie built,
 even if its caller was Codex. It explicitly selects the generated source
