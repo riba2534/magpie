@@ -41,6 +41,11 @@ func noteSignIn(ctx context.Context, a *provider.Account, req *http.Request, res
 	if a == nil || res == nil {
 		return
 	}
+	// A renewed sign-in may have retried the request. The vendor's
+	// answer names that credential, not the one on the first attempt.
+	if res.Request != nil {
+		req = res.Request
+	}
 	switch {
 	case res.StatusCode >= 200 && res.StatusCode < 300:
 		provider.ServedSignIn(a)
