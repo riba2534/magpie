@@ -1,0 +1,24 @@
+{
+  "method": "POST",
+  "path": "/backend-api/codex/responses",
+  "server_role": "model",
+  "headers": {
+    "version": "0.162.1",
+    "x-codex-beta-features": "remote_compaction_v2",
+    "x-codex-window-id": "01a140d1-2963-75b3-81e0-0e723fddf1f9:0",
+    "x-codex-turn-metadata": "{\"installation_id\":\"248e580c-64b3-4c44-ab3b-c499db8bdeb0\",\"session_id\":\"01a140d1-2963-75b3-81e0-0e723fddf1f9\",\"thread_id\":\"01a140d1-2963-75b3-81e0-0e723fddf1f9\",\"agent_name\":\"/root\",\"turn_id\":\"01a140d1-297d-7f72-bc78-0319004eedb1\",\"window_id\":\"01a140d1-2963-75b3-81e0-0e723fddf1f9:0\",\"window_number\":0,\"context_window_id\":\"01a140d1-2964-7093-a71d-18d9619a0861\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a140d1-297d-7f72-bc78-0319004eedb1\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792088811903,\"analytics_enabled\":false,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"low\"}",
+    "x-codex-routing-hint": "model=gpt-5.5",
+    "x-client-request-id": "01a140d1-2963-75b3-81e0-0e723fddf1f9",
+    "session-id": "01a140d1-2963-75b3-81e0-0e723fddf1f9",
+    "thread-id": "01a140d1-2963-75b3-81e0-0e723fddf1f9",
+    "accept": "text/event-stream",
+    "content-encoding": "zstd",
+    "content-type": "application/json",
+    "chatgpt-account-id": "acct-offline",
+    "originator": "codex_exec",
+    "user-agent": "codex_exec/0.162.1 (Linux Unknown; x86_64) OfflineCapture/1 (codex_exec; 0.162.1)"
+  },
+  "body_bytes_decoded": 42054,
+  "authorization_present": true,
+  "body_file": "04-post.body.json"
+}

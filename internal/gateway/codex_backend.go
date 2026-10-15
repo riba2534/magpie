@@ -785,6 +785,9 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		ctx := provider.ViaSignedIn(r.Context(), "codex")
 		if on != nil {
 			ctx = on.Via(r.Context())
+			if fromCodex(r.Header) {
+				ctx = provider.CodexClientRequest(ctx, r.Header)
+			}
 		}
 		req, err := http.NewRequestWithContext(ctx, r.Method, u, bytes.NewReader(body))
 		if err != nil {
@@ -819,7 +822,12 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		// a turn to ChatGPT goes zstd-compressed again, as Codex sent it
 		// before magpie read it (ylorn on X); an API key's goes plain
 		sent = provider.CodexCompressed(req, body)
-		if res, err = s.client.Do(req); err != nil {
+		if on != nil {
+			res, err = on.Do(s.client, req)
+		} else {
+			res, err = s.client.Do(req)
+		}
+		if err != nil {
 			msg := "OpenAI: " + err.Error()
 			if rest == "/responses" {
 				msg = codexUnreached(modelOf(body), err)
@@ -1976,6 +1984,9 @@ func userMessage(text string) map[string]any {
 // when none is left Codex is told so. One conversation's compaction that
 // keeps failing stops being asked for a while (compactFails, #2274).
 func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byte) {
+	// This is a summary magpie builds, not the remote compaction request
+	// Codex sent. Its rebuilt payload is prepared and signed as such.
+	r = r.WithContext(provider.CodexRequestSource{}.Context(r.Context()))
 	key, model := compactKey(body), modelOf(body)
 	if msg, held := s.compactFails.held(key, model); held {
 		log.Printf("codex compaction: %s", msg)
