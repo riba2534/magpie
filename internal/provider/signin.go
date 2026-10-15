@@ -338,7 +338,7 @@ func (s *signInFlow) begin() error {
 			return err
 		}
 	case "codex":
-		// ChatGPT sends the browser back only to this one port. One that
+		// This sign-in uses the registered callback port. One that
 		// can't be had (Windows reserves it, or another program holds it)
 		// doesn't stop the sign-in: the page the browser ends on has the
 		// code in its address, and that address pasted finishes it (#1782)

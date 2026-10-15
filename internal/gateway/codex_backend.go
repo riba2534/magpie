@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -665,8 +666,27 @@ func codexAccounts(r *http.Request, model string) (string, bool) {
 	return id, true
 }
 
-// withModel is a request body asking for another model.
+// withModel is a request body asking for another model. A unique string
+// field is replaced in place: Codex puts routing fields before its large
+// input, and neither their order nor the other fields' encoding changes.
+// Ambiguous fields still use the object rewrite below. A local replacement
+// of the first duplicate would leave a later model overriding the route.
 func withModel(body []byte, model string) []byte {
+	if top := gjson.ParseBytes(body); top.IsObject() && gjson.ValidBytes(body) {
+		models, stringModel := 0, false
+		top.ForEach(func(k, v gjson.Result) bool {
+			// encoding/json also accepts Model/MODEL when reading the
+			// request envelope. Keep their previous ordering semantics.
+			if strings.EqualFold(k.Str, "model") {
+				models++
+				stringModel = k.Str == "model" && v.Type == gjson.String
+			}
+			return models < 2
+		})
+		if models == 1 && stringModel {
+			return rewriteModel(body, model)
+		}
+	}
 	var q map[string]json.RawMessage
 	if json.Unmarshal(body, &q) != nil {
 		return body
@@ -785,6 +805,9 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		ctx := provider.ViaSignedIn(r.Context(), "codex")
 		if on != nil {
 			ctx = on.Via(r.Context())
+			if fromCodex(r.Header) {
+				ctx = provider.CodexClientRequest(ctx, r.Header)
+			}
 		}
 		req, err := http.NewRequestWithContext(ctx, r.Method, u, bytes.NewReader(body))
 		if err != nil {
@@ -794,6 +817,21 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		}
 		copyHeaders(req.Header, r.Header)
 		if on != nil {
+			// A query key can authenticate the caller to magpie. Remove
+			// it only from this outbound request, keeping every other
+			// query byte and the incoming request's key checks intact.
+			if req.URL.RawQuery != "" {
+				fields := strings.Split(req.URL.RawQuery, "&")
+				kept := fields[:0]
+				for _, field := range fields {
+					name, _, _ := strings.Cut(field, "=")
+					if name, err := url.QueryUnescape(name); err == nil && name == "key" {
+						continue
+					}
+					kept = append(kept, field)
+				}
+				req.URL.RawQuery = strings.Join(kept, "&")
+			}
 			// the account's own token and id in place of the sign-in's;
 			// what Codex said it takes back stays as it said it
 			accept := req.Header.Values("Accept")
@@ -819,7 +857,12 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		// a turn to ChatGPT goes zstd-compressed again, as Codex sent it
 		// before magpie read it (ylorn on X); an API key's goes plain
 		sent = provider.CodexCompressed(req, body)
-		if res, err = s.client.Do(req); err != nil {
+		if on != nil {
+			res, err = on.Do(s.client, req)
+		} else {
+			res, err = s.client.Do(req)
+		}
+		if err != nil {
 			msg := "OpenAI: " + err.Error()
 			if rest == "/responses" {
 				msg = codexUnreached(modelOf(body), err)
@@ -1976,6 +2019,9 @@ func userMessage(text string) map[string]any {
 // when none is left Codex is told so. One conversation's compaction that
 // keeps failing stops being asked for a while (compactFails, #2274).
 func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byte) {
+	// This is a summary magpie builds, not the remote compaction request
+	// Codex sent. Its rebuilt payload is prepared and signed as such.
+	r = r.WithContext(provider.CodexRequestSource{}.Context(r.Context()))
 	key, model := compactKey(body), modelOf(body)
 	if msg, held := s.compactFails.held(key, model); held {
 		log.Printf("codex compaction: %s", msg)

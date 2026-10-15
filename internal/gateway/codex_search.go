@@ -132,6 +132,9 @@ func (s *Server) alphaSearchOn(w http.ResponseWriter, r *http.Request, body []by
 	for _, on := range ons {
 		who := "OpenAI (" + on.Account.User + "): "
 		ctx := on.Via(r.Context())
+		if fromCodex(r.Header) {
+			ctx = provider.CodexClientRequest(ctx, r.Header)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.CodexBase+AlphaSearchPath, bytes.NewReader(body))
 		if err != nil {
 			errs = append(errs, who+err.Error())
@@ -153,7 +156,7 @@ func (s *Server) alphaSearchOn(w http.ResponseWriter, r *http.Request, body []by
 			errs = append(errs, who+why)
 			continue
 		}
-		res, err := s.client.Do(req)
+		res, err := on.Do(s.client, req)
 		if err != nil {
 			if r.Context().Err() != nil {
 				return true, ""

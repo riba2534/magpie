@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -56,6 +57,9 @@ func TestInstalledVersion(t *testing.T) {
 	p := filepath.Join(bin, "pi")
 	for _, c := range []struct{ out, want string }{{"0.98.2", "0.98.2"}, {"pi 0.99.0\n", "0.99.0"}} {
 		testenv.Program(t, p, "#!/bin/sh\necho '"+c.out+"'\n")
+		// The fixture may change within one directory timestamp tick.
+		// This tests the version read, not PATH's lookup cache.
+		proc.Forget()
 		if v := a.InstalledVersion(); v != c.want {
 			t.Errorf("%q: %q", c.out, v)
 		}

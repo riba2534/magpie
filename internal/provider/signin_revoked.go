@@ -24,7 +24,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 )
 
 // revokedPrefix starts a savedLogin's Refused when it holds the mark of a
@@ -136,9 +135,8 @@ func SignInMarked(a *Account) bool {
 }
 
 // NoteRevokedSignIn keeps that the vendor revoked the credential req went
-// to account a with. A saved ChatGPT account is refreshed first, as Codex
-// does on a 401: a refresh that goes through is a new sign-in, and the
-// account isn't marked.
+// to account a with. Provider.Do owns a Codex account's 401 recovery;
+// observing the final refusal never starts another refresh.
 func NoteRevokedSignIn(ctx context.Context, a *Account, req *http.Request) {
 	if !RevokedAccount(a) {
 		return
@@ -147,17 +145,14 @@ func NoteRevokedSignIn(ctx context.Context, a *Account, req *http.Request) {
 	if m == "" {
 		return
 	}
-	if a.Agent == "codex" && a.token != nil {
-		// refreshed, the next request goes with the new token; refused
-		// or unanswered, the token sent is revoked all the same
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		_, _, err := renewSavedLogin(rctx, a.Agent, a.User, true)
-		cancel()
-		if err == nil {
+	why := revokedText(a.User)
+	if a.Agent == "codex" {
+		savedTokenMu.Lock()
+		defer savedTokenMu.Unlock()
+		if !keepCodexRefusal(a, req, m, why) {
 			return
 		}
 	}
-	why := revokedText(a.User)
 	revoked.Lock()
 	revokedLoad()
 	k := revokedKey(a.Agent, a.User)
@@ -167,13 +162,37 @@ func NoteRevokedSignIn(ctx context.Context, a *Account, req *http.Request) {
 	revoked.marks[m] = why
 	revoked.accounts[k] = m
 	revoked.Unlock()
+	if a.Agent == "codex" {
+		return // persisted with its credential above
+	}
 	_ = editSideLogin(a.Agent, a.User, func(ls []savedLogin, i int) ([]savedLogin, error) {
 		ls[i].Lapsed, ls[i].Refused = why, revokedPrefix+m
 		return ls, nil
 	})
 }
 
-// ServedSignIn notes a request account a's vendor served: a mark of a
+// ServedSignInForRequest observes the credential a vendor actually served.
+// A Codex request on a token since replaced cannot clear the replacement's
+// refusal. Conversely, a served credential still held by this account can
+// clear an older mark, even when that mark names another token.
+func ServedSignInForRequest(a *Account, req *http.Request) {
+	if a == nil || a.Agent != "codex" {
+		ServedSignIn(a)
+		return
+	}
+	if req == nil || !RevokedAccount(a) || !SignInMarked(a) {
+		return
+	}
+	savedTokenMu.Lock()
+	defer savedTokenMu.Unlock()
+	if _, _, _, current := codexHeldAuth(a, req); current {
+		ServedSignIn(a)
+	}
+}
+
+// ServedSignIn clears an account's refusal after an explicit renewal or a
+// successful request from a caller that owns its credential state. HTTP
+// response observers use ServedSignInForRequest. A mark of a
 // revoked sign-in it has is gone, as the account was signed in again or
 // its sign-in refreshed.
 func ServedSignIn(a *Account) {

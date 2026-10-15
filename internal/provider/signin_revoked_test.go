@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Only a 401 whose words say the sign-in is gone marks it (#1793): an
@@ -117,80 +119,38 @@ func TestRevokedSignInLeavesOthersMarks(t *testing.T) {
 	}
 }
 
-// A saved ChatGPT account is refreshed before it is marked, as Codex does
-// on a 401: a refresh that goes through is a new sign-in. A refresh refused
-// marks it, and the account's row says so.
-func TestRevokedCodexRefreshedFirst(t *testing.T) {
-	home := signIn(t)
+// Provider.Do owns Codex's 401 recovery. Observing its final refusal marks
+// that credential without spending the rotated refresh token a second time.
+func TestRevokedCodexNotRefreshedByObservation(t *testing.T) {
+	f := codexCredential(t, "saved", fakeJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}), time.Now())
 	resetRevoked()
 	t.Cleanup(resetRevoked)
-	codexSignIn(t, home, "old@example.com", "r-old")
-	rememberLogins(true)
-	codexSignIn(t, home, "work@example.com", "r-work")
-	rememberLogins(true)
-	refuse := false
+	var calls atomic.Int32
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if refuse {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"invalid_grant","error_description":"refresh token has been revoked"}`))
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"access_token": "fresh-old", "refresh_token": "r-old-2"})
+		calls.Add(1)
+		w.WriteHeader(500)
 	}))
 	defer fake.Close()
-	old := codexTokenURL
-	codexTokenURL = fake.URL
-	t.Cleanup(func() { codexTokenURL = old })
-
-	if err := SetLoginOn("codex", "old@example.com", true); err != nil {
-		t.Fatal(err)
+	defer CodexTokenURLForTest(fake.URL)()
+	req := codexRecoveryRequest(t, f, context.Background(), fake.URL)
+	NoteRevokedSignIn(context.Background(), f.p.Account, req)
+	if calls.Load() != 0 {
+		t.Fatal("observing a refusal refreshed again")
 	}
-	p, err := Find("codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	also := p.AlsoOn()
-	if len(also) != 1 || also[0].Account.User != "old@example.com" || also[0].Account.token == nil {
-		t.Fatalf("not the saved account: %+v", also)
-	}
-	a := also[0].Account
-	lapsed := func() string {
-		for _, l := range Logins("codex") {
-			if l.User == "old@example.com" {
-				return l.Lapsed
-			}
-		}
-		t.Fatal("old@ isn't listed")
-		return ""
-	}
-
-	NoteRevokedSignIn(context.Background(), a, revokedReq(t, "stale"))
-	if _, ok := RevokedSignIn(a, revokedReq(t, "stale")); ok {
-		t.Fatal("marked although its refresh went through")
-	}
-	if got := lapsed(); got != "" {
-		t.Fatalf("refreshed, still said signed out: %q", got)
-	}
-
-	refuse = true
-	NoteRevokedSignIn(context.Background(), a, revokedReq(t, "fresh-old"))
-	if _, ok := RevokedSignIn(a, revokedReq(t, "fresh-old")); !ok {
-		t.Fatal("its refresh refused, the account isn't marked")
-	}
-	if got := lapsed(); !strings.Contains(got, "sign in again") {
-		t.Fatalf("not said signed out: %q", got)
+	if _, marked := RevokedSignIn(f.p.Account, req); !marked {
+		t.Fatal("the refused credential wasn't marked")
 	}
 }
 
 // The account's record written again with the same sign-in (as each time
 // Codex's auth.json is read) keeps the mark; a new sign-in drops it.
 func TestUpsertLoginKeepsRevokedMarkForTheSameSignIn(t *testing.T) {
-	ls := []savedLogin{{Agent: "codex", User: "x@example.com", Auth: json.RawMessage("{\n  \"a\": 1\n}"), Lapsed: revokedText("x@example.com"), Refused: revokedPrefix + "m"}}
-	same := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"a":1}`)})
+	ls := []savedLogin{{Agent: "codex", User: "x@example.com", Auth: json.RawMessage("{\n  \"tokens\": {\"access_token\":\"a\"}\n}"), Lapsed: revokedText("x@example.com"), Refused: revokedPrefix + "m"}}
+	same := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"tokens":{"access_token":"a"}}`)})
 	if len(same) != 1 || same[0].Refused != revokedPrefix+"m" || same[0].Lapsed == "" {
 		t.Fatalf("the same sign-in lost its mark: %+v", same)
 	}
-	anew := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"a":2}`)})
+	anew := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"tokens":{"access_token":"b"}}`)})
 	if len(anew) != 1 || anew[0].Refused != "" || anew[0].Lapsed != "" {
 		t.Fatalf("a new sign-in kept the mark: %+v", anew)
 	}

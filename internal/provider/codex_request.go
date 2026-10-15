@@ -26,30 +26,44 @@ import (
 // /codex/responses answers 404 "Model not found" for a model its own
 // /codex/models lists.
 
-// codexSign authenticates a request to the ChatGPT backend with the
-// tokens token hands out, and says it comes from Codex CLI.
+// codexSign authenticates a request with the selected account's tokens.
+// A relayed Codex request keeps its client's identity; one magpie built
+// uses the Codex CLI identity and codexBody's subscription compatibility.
 func codexSign(token func(context.Context) (tok, accountID string, err error)) func(context.Context, *http.Request, []byte) error {
 	return func(ctx context.Context, req *http.Request, body []byte) error {
 		tok, accountID, err := token(ctx)
 		if err != nil {
 			return err
 		}
+		clearCodexAccount(req.Header)
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if accountID != "" {
 			req.Header.Set("chatgpt-account-id", accountID)
 		}
-		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", "codex_cli_rs")
-		// the version and the User-Agent name one Codex, never older than
-		// the client whose request this is (its version header, relayed)
-		ver := newerVersion(codexVersion(), req.Header.Get("version"))
-		req.Header.Set("version", ver)
-		req.Header.Set("User-Agent", codexUserAgent(ver))
+		src := codexSource(ctx)
+		if src.head != nil {
+			src.put(req.Header)
+		} else {
+			req.Header.Set("OpenAI-Beta", "responses=experimental")
+			req.Header.Set("originator", "codex_cli_rs")
+			// A generated request names a client new enough for the model;
+			// a relayed client's explicit version, above, is its own.
+			ver := newerVersion(codexVersion(), req.Header.Get("version"))
+			req.Header.Set("version", ver)
+			req.Header.Set("User-Agent", codexUserAgent(ver))
+		}
 		if body == nil {
 			return nil
 		}
-		req.Header.Set("Accept", "text/event-stream")
-		sessionHeaders(req.Header, body)
+		if src.head == nil {
+			if req.Header.Get("X-OpenAI-Internal-Codex-Responses-Lite") != "" && !codexLiteBody(body) {
+				req.Header.Del("X-OpenAI-Internal-Codex-Responses-Lite")
+			}
+			req.Header.Set("Accept", "text/event-stream")
+			sessionHeaders(req.Header, body)
+		} else {
+			src.sessionHeaders(req.Header, body)
+		}
 		return nil
 	}
 }
@@ -244,11 +258,11 @@ func codexInstructions(model string) string {
 	return codexcat.Prompt
 }
 
-// codexBody makes a Responses request the one Codex CLI would send: it
-// streams only, keeps nothing (so its items carry no ids), carries Codex's
-// instructions — the client's own riding first in the input — and rejects
-// the sampling knobs, explicit cache options and any service tier but
-// Fast's and Ultrafast's.
+// codexBody fits a generated Responses request to the subscription backend:
+// it streams only, keeps nothing (so its items carry no ids), carries
+// Codex's instructions — the client's own riding first in the input — and
+// rejects the sampling knobs, explicit cache options and any service tier
+// but Fast's and Ultrafast's. A request Codex built uses PrepareFrom instead.
 func codexBody(body []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -266,7 +280,7 @@ func codexBody(body []byte) []byte {
 	}
 	// Codex's Fast mode sends "priority", its Ultrafast "ultrafast"; any
 	// other tier stays out
-	if t := m["service_tier"]; t != "priority" && t != "ultrafast" {
+	if tier, _ := m["service_tier"].(string); !codexTier(tier) {
 		delete(m, "service_tier")
 	}
 	model, _ := m["model"].(string)
@@ -339,6 +353,10 @@ func codexBody(body []byte) []byte {
 	}
 	return out
 }
+
+// codexTier is a service tier supported by the ChatGPT subscription
+// backend, for a relayed Codex request as for one magpie builds.
+func codexTier(tier string) bool { return tier == "priority" || tier == "ultrafast" }
 
 // conversationKey names the conversation a request belongs to, for a client
 // that doesn't (Codex sends its thread's id as prompt_cache_key): the

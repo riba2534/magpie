@@ -376,7 +376,7 @@ func importLogin(ctx context.Context, agent string, e loginImport, name string, 
 	switch agent {
 	case "codex":
 		raw := map[string]any{"tokens": map[string]any{"refresh_token": e.refreshToken}}
-		if _, err := codexRefresh(ctx, raw); err != nil {
+		if _, err := codexRefresh(ctx, raw, codexForced); err != nil {
 			return refused("ChatGPT", err)
 		}
 		t := raw["tokens"].(map[string]any)

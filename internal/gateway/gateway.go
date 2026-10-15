@@ -3895,6 +3895,10 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		// only the ChatGPT backend runs Codex's tool search as Codex sends it
 		if p.Account == nil || p.Account.Agent != "codex" {
 			body, searchFn = searchAsFunction(body)
+		} else {
+			// A native request keeps its item IDs; foreign tool call IDs
+			// still need the backend's bound, as on codexUpstream.
+			body = boundCallIDs(body)
 		}
 		body = forVendor(p, body)
 		if replay {
@@ -4071,7 +4075,17 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if proto == provider.Responses && p.Account != nil && (p.Account.Agent == "grok" || p.PluginProvider() == "grok" || p.PluginProvider() == "zed") {
 		named = namespacedIn(body)
 	}
-	res, err := s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header)
+	// The source belongs to this outbound payload. IR builds never pass
+	// through here, and an internal summary can explicitly name a generated
+	// source even while carrying Codex's original headers.
+	ctx := provider.CodexRequestSource{}.Context(r.Context())
+	if proto == provider.Responses && p.Account != nil && p.Account.Agent == "codex" && fromCodex(r.Header) {
+		ctx = provider.CodexClientRequest(r.Context(), r.Header)
+	}
+	send := func(b []byte) (*http.Response, error) {
+		return s.forward(ctx, p, proto, path, p.PrepareFrom(ctx, b), r.Header)
+	}
+	res, err := send(body)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 	}
@@ -4100,7 +4114,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			mark = schemaRefused(model)
 		}
 		body = nb
-		if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+		if res, err = send(body); err != nil {
 			return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 		}
 		if res.StatusCode < 400 {
@@ -4131,7 +4145,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 				turnAfter = true
 				refused = append(refused, prefillRefused(model))
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4143,7 +4157,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if nb, changed := objectRootsBody(proto, body); changed {
 				refused = append(refused, rootUnionRefused(model))
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4155,7 +4169,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if nb, changed := withoutToolStrict(proto, body); changed {
 				refused = append(refused, toolStrictRefused)
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4169,7 +4183,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if nb := withoutReasoningText(body); !bytes.Equal(nb, body) {
 				refused = append(refused, reasoningTextRefused(model))
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4187,7 +4201,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if nb := withoutBareReasoning(body); !replay && !bytes.Equal(nb, body) {
 				refused = append(refused, bareReasoningRefused(model))
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4201,7 +4215,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if nb := plainItemIDs(body); !bytes.Equal(nb, body) {
 				refused = append(refused, itemIDsRefused(model))
 				body = nb
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+				if res, err = send(body); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
@@ -4220,7 +4234,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 			refused = append(refused, imageToolRefused)
 			body = nb
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+			if res, err = send(body); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 			continue
@@ -4231,7 +4245,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			refused = append(refused, messageField(f))
 		}
 		body = withoutMessageReasoning(body, ms)
-		if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+		if res, err = send(body); err != nil {
 			return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 		}
 	}
@@ -4256,12 +4270,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 				refused = levelRefused(model, e)
 			}
 			s.markUnfit(p.ID, refused, proto)
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(withBodyEffort(proto, body, onEffort(p, model))), r.Header); err != nil {
+			if res, err = send(withBodyEffort(proto, body, onEffort(p, model))); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		} else if proto == provider.Chat && mandatoryReasoning.Match(b) {
 			if nb, ok := withoutReasoningOff(body); ok {
-				if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+				if res, err = send(nb); err != nil {
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 			}
@@ -4274,7 +4288,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
 		if toolsWithoutEffort.Match(b) && !s.servesElsewhere(p, model, proto) {
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(withBodyEffort(proto, body, "none")), r.Header); err != nil {
+			if res, err = send(withBodyEffort(proto, body, "none")); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		}
@@ -4288,18 +4302,18 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		// Sonnet 5.5 by a name thinkingOffAsTaken doesn't know asks for
 		// between_tools in place of disabled (#1454)
 		if nb, ok := withBetweenTools(body); ok && asksBetweenTools.Match(b) {
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+			if res, err = send(nb); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		} else if nb, ok := withoutThinkingOff(body); ok && refusesThinkingOff(b) {
 			s.markUnfit(p.ID, offRefused(model), proto)
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+			if res, err = send(nb); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		} else if nb, ok := withoutSampling(body); ok && samplingDeprecated.Match(b) {
 			// a Claude by a name samplingAsTaken doesn't know refusing
 			// temperature, top_p or top_k (#1454)
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+			if res, err = send(nb); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		}
@@ -4639,6 +4653,9 @@ func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
 // served on this one, the request is built again for the next endpoint it
 // speaks, and the model is remembered there.
 func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, provider.Protocol, error) {
+	// An IR build is magpie's payload, even when its caller was Codex or
+	// a retry was reached from a native request's context.
+	ctx = provider.CodexRequestSource{}.Context(ctx)
 	if req.ThinkOff && req.Effort != "none" && slices.Contains(p.Efforts(model), "none") {
 		// the client turned reasoning off (Effort reads that as low), and
 		// the model can stop thinking: asked for none (#899)
