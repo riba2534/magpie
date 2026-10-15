@@ -157,7 +157,13 @@ Codex's error classification separate from the other subscriptions'. A
 rotation is saved in the current credential store (`codexStore.write`, file
 or supported keychain) or in `logins.json` for a saved account. Renewal and
 switching share the saved-token lock; a store changed by another writer is
-checked before a rotated credential replaces it.
+checked before a rotated credential replaces it. These checks, and a 401
+reload, read the keychain secret itself: its modification date has only
+second precision, so an unchanged date cannot rule out a concurrent token
+rotation or sign-in. Normal account and usage reads retain the cached
+secret while that date is unchanged; explicit reads still join a prompt
+already in flight and observe the existing bounded wait. An explicit read
+can ask for keychain permission again.
 
 A replayable request signed by a Codex account and sent through `Provider.Do`
 gets one same-account recovery attempt on HTTP 401 (`retryCodexAuth`). The
@@ -177,6 +183,7 @@ mark across JSON reordering or unrelated metadata edits. A direct relay of
 the client's own sign-in is left for that client to recover.
 
 Sources: [`codex_auth.go`](../../internal/provider/codex_auth.go),
+[`codex_store.go`](../../internal/provider/codex_store.go),
 [`codex_recovery.go`](../../internal/provider/codex_recovery.go),
 [`logins_on.go`](../../internal/provider/logins_on.go),
 [`signin_revoked.go`](../../internal/provider/signin_revoked.go).
