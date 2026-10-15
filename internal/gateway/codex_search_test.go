@@ -104,7 +104,7 @@ func TestCodexWebRunSearchesOnChatGPTAccount(t *testing.T) {
 			if a := hd.Get("Authorization"); a == "" || a == "Bearer magpie" || hd.Get("x-openai-actor-authorization") != "" {
 				t.Fatalf("%s: magpie's own token or actor header went on: %v", path, hd)
 			}
-			if hd.Get("x-codex-turn-metadata") != `{"turn_id":"t1"}` || hd.Get("originator") != "codex_cli_rs" || hd.Get("Accept") == "text/event-stream" {
+			if hd.Get("x-codex-turn-metadata") != `{"turn_id":"t1"}` || hd.Get("originator") != "codex_exec" || hd.Get("User-Agent") != "codex_exec/0.162.1 (Linux 6.8; x86_64)" || hd.Get("Accept") == "text/event-stream" {
 				t.Fatalf("%s: headers %v", path, hd)
 			}
 			q := bodies[i]
