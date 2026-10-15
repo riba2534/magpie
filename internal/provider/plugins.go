@@ -623,5 +623,9 @@ func (p Provider) Do(client *http.Client, req *http.Request) (*http.Response, er
 		}
 	}
 	req.Header.Del(ConversationHeader)
-	return client.Do(req)
+	res, err := client.Do(req)
+	if err != nil {
+		return res, err
+	}
+	return p.retryCodexAuth(client, req, res)
 }

@@ -212,7 +212,12 @@ func (p Provider) alsoOn() []Provider {
 			a.token = func(context.Context) (string, error) { return claudeSavedDir(user) }
 		}
 		if agent == "codex" {
+			a.codexHome = ""
+			a.codexIdentity = savedCodexIdentity(user)
 			a.sign = codexSign(func(ctx context.Context) (string, string, error) { return savedLoginToken(ctx, agent, user) })
+			a.recover = func(ctx context.Context, sent codexSentAuth) (string, string, error) {
+				return recoverSavedCodex(ctx, user, sent)
+			}
 		}
 		q := p
 		q.Account = &a
@@ -253,9 +258,24 @@ func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID st
 // refuses is kept on the account as lapsed, until one goes through or it is
 // signed in again.
 func renewSavedLogin(ctx context.Context, agent, user string, force bool) (tok, accountID string, err error) {
+	reason := codexRefreshReason("")
+	if force {
+		reason = codexForced
+	}
+	return renewSavedLoginFor(ctx, agent, user, reason)
+}
+
+func renewSavedLoginFor(ctx context.Context, agent, user string, reason codexRefreshReason) (tok, accountID string, err error) {
 	ctx = ViaLogin(ctx, agent, user) // refreshed through the account's own proxy
 	savedTokenMu.Lock()
 	defer savedTokenMu.Unlock()
+	return renewSavedLoginLocked(ctx, agent, user, reason, nil)
+}
+
+func renewSavedLoginLocked(ctx context.Context, agent, user string, reason codexRefreshReason, sent *codexSentAuth) (tok, accountID string, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	loginsMu.Lock()
 	var l *savedLogin
 	for _, x := range readLogins() {
@@ -268,7 +288,7 @@ func renewSavedLogin(ctx context.Context, agent, user string, force bool) (tok, 
 	if l == nil {
 		return "", "", fmt.Errorf("no saved %s account %q", agent, user)
 	}
-	var auth []byte
+	var fresh map[string]any
 	switch agent {
 	case "codex":
 		var raw map[string]any
@@ -276,31 +296,47 @@ func renewSavedLogin(ctx context.Context, agent, user string, force bool) (tok, 
 		if json.Unmarshal(l.Auth, &raw) != nil || json.Unmarshal(l.Auth, &a) != nil || a.Tokens.AccessToken == "" {
 			return "", "", errors.New("the saved ChatGPT sign-in of " + user + " is unreadable")
 		}
-		accountID = a.Tokens.AccountID
-		if accountID == "" {
-			accountID = claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
+		accountID = codexAccountID(a)
+		if sent != nil && !sent.matches(a) {
+			return "", "", errCodexAccountChanged
 		}
-		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); !force && (exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute) {
+		if sent != nil && a.Tokens.AccessToken != sent.token && !codexExpired(a) {
 			return a.Tokens.AccessToken, accountID, nil
 		}
-		if tok, err = codexRefresh(ctx, raw); err != nil {
-			return "", "", savedRefreshFailed(agent, user, err)
+		if reason == "" {
+			reason = codexRefreshDue(a, time.Now())
+			if reason == "" {
+				return a.Tokens.AccessToken, accountID, nil
+			}
 		}
-		if auth, err = json.MarshalIndent(raw, "", "  "); err != nil {
-			return "", "", err
+		if tok, err = codexRefresh(ctx, raw, reason); err != nil {
+			if codexStillUsable(ctx, a, reason, err) {
+				return a.Tokens.AccessToken, accountID, nil
+			}
+			return "", "", savedRefreshFailed(agent, user, l.Auth, err)
 		}
+		fresh = raw
 	default:
 		return "", "", fmt.Errorf("%s accounts can't be used side by side", agent)
 	}
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	ls := readLogins()
+	found := false
 	for i := range ls {
 		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
+			auth, err := codexRotated(ls[i].Auth, l.Auth, fresh)
+			if err != nil {
+				return "", "", err
+			}
+			found = true
 			ls[i].Auth = auth
 			ls[i].Renewed = time.Now().UTC().Truncate(time.Second)
 			ls[i].Lapsed = ""
 		}
+	}
+	if !found {
+		return "", "", fmt.Errorf("no saved %s account %q", agent, user)
 	}
 	return tok, accountID, writeLogins(ls)
 }
@@ -309,7 +345,7 @@ func renewSavedLogin(ctx context.Context, agent, user string, force bool) (tok, 
 // refused is marked lapsed on the account: that sign-in is gone and has to be
 // made again, in magpie; the agent's own login command would sign the agent
 // in, not this account. A refresh that never got an answer marks nothing.
-func savedRefreshFailed(agent, user string, err error) error {
+func savedRefreshFailed(agent, user string, auth []byte, err error) error {
 	var refused refreshRefused
 	if !errors.As(err, &refused) {
 		return fmt.Errorf("%s: %w", user, err)
@@ -320,6 +356,9 @@ func savedRefreshFailed(agent, user string, err error) error {
 	ls := readLogins()
 	for i := range ls {
 		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
+			if !sameCodexCredential(ls[i].Auth, auth) {
+				return errCodexAccountChanged
+			}
 			ls[i].Lapsed = msg
 		}
 	}
