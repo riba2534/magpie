@@ -21,6 +21,14 @@ func TestCodexSignReplacesAccountIdentity(t *testing.T) {
 				"x-oai-attestation":            "previous-attestation",
 				"x-codex-turn-state":           "previous-route",
 				"x-openai-codex-luna-reserve":  "1",
+				"X-Api-Key":                    "previous-gateway-key",
+				"x-API-key":                    "previous-mixed-gateway-key",
+				"X-Goog-Api-Key":               "previous-google-key",
+				"x-GOOG-api-KEY":               "previous-mixed-google-key",
+				"API-KEY":                      "previous-api-key",
+				"api-key":                      "previous-lower-api-key",
+				"Cookie":                       "session=previous-cookie",
+				"cOoKiE":                       "session=previous-mixed-cookie",
 			} {
 				// A relayed header may retain its client's spelling.
 				req.Header[k] = []string{v}
@@ -33,6 +41,9 @@ func TestCodexSignReplacesAccountIdentity(t *testing.T) {
 				t.Error("request did not get the selected account's identity")
 			}
 			for k := range req.Header {
+				if name := strings.ToLower(k); name == "x-api-key" || name == "x-goog-api-key" || name == "api-key" || name == "cookie" {
+					t.Errorf("caller's credential header %s retained", k)
+				}
 				if k == "chatgpt-account-id" || k == "x-openai-actor-authorization" || k == "x-oai-attestation" || k == "x-codex-turn-state" || k == "x-openai-codex-luna-reserve" {
 					t.Errorf("previous account's header %s retained", k)
 				}

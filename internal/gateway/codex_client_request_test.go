@@ -51,6 +51,10 @@ func codexClientHead() http.Header {
 		"x-oai-attestation":                      "original-attestation",
 		"x-codex-turn-state":                     "original-route",
 		"x-openai-codex-luna-reserve":            "1",
+		"X-Api-Key":                              "original-gateway-key",
+		"X-Goog-Api-Key":                         "original-google-key",
+		"api-key":                                "original-api-key",
+		"Cookie":                                 "session=original-cookie",
 	} {
 		h.Set(k, v)
 	}
@@ -58,9 +62,9 @@ func codexClientHead() http.Header {
 }
 
 type codexClientCall struct {
-	path string
-	head http.Header
-	body []byte
+	path, query string
+	head        http.Header
+	body        []byte
 }
 
 type codexClientBackend struct {
@@ -87,7 +91,7 @@ func (b *codexClientBackend) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	call := codexClientCall{r.URL.Path, r.Header.Clone(), body}
+	call := codexClientCall{path: r.URL.Path, query: r.URL.RawQuery, head: r.Header.Clone(), body: body}
 	b.mu.Lock()
 	b.calls = append(b.calls, call)
 	b.mu.Unlock()
@@ -169,7 +173,7 @@ func sameCodexClient(t *testing.T, got, want http.Header) {
 			t.Errorf("Codex %s changed: got %q, want %q", k, got.Get(k), want.Get(k))
 		}
 	}
-	for _, k := range []string{"x-openai-actor-authorization", "x-oai-attestation", "x-codex-turn-state", "x-openai-codex-luna-reserve"} {
+	for _, k := range []string{"x-openai-actor-authorization", "x-oai-attestation", "x-codex-turn-state", "x-openai-codex-luna-reserve", "x-api-key", "x-goog-api-key", "api-key", "cookie"} {
 		if got.Get(k) != "" {
 			t.Errorf("the previous account's %s was sent", k)
 		}
@@ -332,7 +336,15 @@ func TestCodexClientSearchAndCompactKeepIdentity(t *testing.T) {
 			if compact {
 				path, body = CodexPath+"/responses/compact", []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg_user","role":"user","content":"summarize"}]}`)
 			}
-			w := postCodexClient(New().Handler(), path, body, head)
+			const query = "key=caller-query&trace=a%2fb&%6bey=encoded-caller-query&tag=1&tag=2"
+			req := httptest.NewRequest(http.MethodPost, path+"?"+query, strings.NewReader(string(body)))
+			req.Header = head.Clone()
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			New().Handler().ServeHTTP(w, req)
+			if req.URL.RawQuery != query {
+				t.Error("re-signing changed the incoming request's query")
+			}
 			if w.Code != http.StatusOK {
 				t.Fatalf("%d %s", w.Code, w.Body.String())
 			}
@@ -343,6 +355,13 @@ func TestCodexClientSearchAndCompactKeepIdentity(t *testing.T) {
 			call := calls[0]
 			sameCodexClient(t, call.head, head)
 			sameCodexBody(t, call.body, withModel(body, "gpt-5.5"))
+			wantQuery := "" // search does not forward the incoming query
+			if compact {
+				wantQuery = "trace=a%2fb&tag=1&tag=2"
+			}
+			if call.query != wantQuery {
+				t.Error("re-signed request retained a caller query key or changed another query field")
+			}
 			if call.head.Get("chatgpt-account-id") != "acct-2" || call.head.Get("Authorization") == head.Get("Authorization") {
 				t.Error("did not use the enabled account's own credentials")
 			}
@@ -361,7 +380,8 @@ func TestCodexClientSingleAccountStillRelayed(t *testing.T) {
 	backend := &codexClientBackend{}
 	codexClientUpstream(t, backend)
 	head := codexClientHead()
-	w := postCodexClient(New().Handler(), CodexPath+"/responses", []byte(codexClientBody), head)
+	const query = "key=caller-query&trace=a%2fb"
+	w := postCodexClient(New().Handler(), CodexPath+"/responses?"+query, []byte(codexClientBody), head)
 	if w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
@@ -370,6 +390,9 @@ func TestCodexClientSingleAccountStillRelayed(t *testing.T) {
 		t.Fatalf("asked %d times", len(calls))
 	}
 	sameCodexBody(t, calls[0].body, []byte(codexClientBody))
+	if calls[0].query != query {
+		t.Error("unsigned relay changed the incoming query")
+	}
 	for k := range head {
 		if calls[0].head.Get(k) != head.Get(k) {
 			t.Errorf("unsigned relay changed %s", k)

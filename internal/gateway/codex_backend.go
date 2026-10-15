@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -816,6 +817,21 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		}
 		copyHeaders(req.Header, r.Header)
 		if on != nil {
+			// A query key can authenticate the caller to magpie. Remove
+			// it only from this outbound request, keeping every other
+			// query byte and the incoming request's key checks intact.
+			if req.URL.RawQuery != "" {
+				fields := strings.Split(req.URL.RawQuery, "&")
+				kept := fields[:0]
+				for _, field := range fields {
+					name, _, _ := strings.Cut(field, "=")
+					if name, err := url.QueryUnescape(name); err == nil && name == "key" {
+						continue
+					}
+					kept = append(kept, field)
+				}
+				req.URL.RawQuery = strings.Join(kept, "&")
+			}
 			// the account's own token and id in place of the sign-in's;
 			// what Codex said it takes back stays as it said it
 			accept := req.Header.Values("Accept")
