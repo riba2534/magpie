@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -73,6 +74,7 @@ func TestZedAppPath(t *testing.T) {
 	if err := os.Symlink(zedBin, filepath.Join(bin, "zed")); err != nil {
 		t.Fatal(err)
 	}
+	proc.Forget() // do not retain a miss from before the fixture's CLI existed
 	custom, err := filepath.EvalSymlinks(custom)
 	if err != nil {
 		t.Fatal(err)
