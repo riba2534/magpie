@@ -1258,6 +1258,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+		case "keychain-retry":
+			// Try again beside Codex's sign-in the macOS keychain didn't
+			// give: a refusal kept is dropped and the item read once
+			// (#2367); its answer, or that the prompt is still up
+			if err := provider.RetryCodexKeychain(); err != nil {
+				fail(rw, err)
+				return
+			}
 		case "save":
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank

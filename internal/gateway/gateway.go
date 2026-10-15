@@ -4507,20 +4507,35 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		status, msg := gather.finish(client, p, sse, cut, sniff.failed)
 		return status, msg, true
 	}
-	if sse && r.Context().Err() == nil && !sniff.whole() {
+	// a Chat stream of Gemini's OpenAI-compatible API is whole only with
+	// its finish_reason, [DONE] or not (saysItsEnd)
+	unfinished := proto == provider.Chat && sniff.failed == "" && sniff.u.Stop == "" && saysItsEnd(p, proto, upstream)
+	if fin := sniff.tail.finish(); sse && unfinished && fin != "" && (rerr == nil || rerr == io.EOF) && r.Context().Err() == nil {
+		// only the finish_reason was lost, after the generation was done
+		// (chatTail): the client gets it, and the reply is whole
+		w.Write([]byte("data: " + string(finishChunk(fin)) + "\n\n"))
+		if !sniff.ended {
+			w.Write([]byte("data: [DONE]\n\n"))
+		}
+		if f != nil {
+			f.Flush()
+		}
+		sniff.u.Stop, unfinished = fin, false
+	}
+	if sse && r.Context().Err() == nil && (!sniff.whole() || unfinished) {
 		// the upstream died mid-reply, or ended it short of its last
 		// event: say so in the stream rather than end it as if whole,
 		// which a client reads as a reply cut off for no reason (#370:
 		// dsh's "stream ended before message_stop", not retried). A Chat
 		// stream may end without [DONE] and be whole, so only a read that
-		// failed counts there; a Gemini one ends on a candidate's
-		// finishReason (#1644).
+		// failed counts there, Gemini's own aside; a Gemini one ends on a
+		// candidate's finishReason (#1644).
 		var failed string
 		switch {
 		case rerr != nil && rerr != io.EOF:
 			failed = cutMidReply(p.Name, rerr)
-		case proto == provider.Anthropic || proto == provider.Responses || proto == provider.Gemini:
-			failed = p.Name + ": the reply ended before it was complete"
+		case proto == provider.Anthropic || proto == provider.Responses || proto == provider.Gemini || unfinished:
+			failed = p.Name + ": " + errEndedShort.Error()
 		}
 		if failed != "" {
 			w.Write(streamFailure(proto, failed))
@@ -5433,12 +5448,19 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	var col collector
 	ended := false // the upstream said its reply ended
+	var tail chatTail
 	see, held := written(zenSee(zen, col.add))
 	err = readSSE(rd, func(_, data string) error {
+		tail.see([]byte(data))
 		u.add(Usage{Upstream: upstreamOf([]byte(data)), Tier: upstreamTier([]byte(data))})
 		ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
 		return dec(data, see)
 	})
+	if fin := tail.finish(); err == nil && !ended && actual == provider.Chat && fin != "" && saysItsEnd(p, actual, model) {
+		// Gemini's OpenAI-compatible API lost only the finish_reason
+		// after its generation was done (chatTail)
+		ended, err = true, dec(string(finishChunk(fin)), see)
+	}
 	held()
 	if err != nil {
 		// a partial answer is not an answer
@@ -5456,7 +5478,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// the vendor failing
 		return writeVendorError(w, from, cmp.Or(col.errStatus, 502), p.Name+": "+said, col.errSaid), said
 	}
-	if col.err == "" && !ended && (actual == provider.Anthropic || actual == provider.Responses || geminiKin(actual)) && r.Context().Err() == nil {
+	if col.err == "" && !ended && saysItsEnd(p, actual, model) && r.Context().Err() == nil {
 		// an Anthropic stream that just stopped — no stop_reason, no
 		// message_stop — or a Responses one with no response.completed is
 		// a reply cut short, not a finished one, as a streaming client is
