@@ -145,12 +145,12 @@ func TestRevokedCodexNotRefreshedByObservation(t *testing.T) {
 // The account's record written again with the same sign-in (as each time
 // Codex's auth.json is read) keeps the mark; a new sign-in drops it.
 func TestUpsertLoginKeepsRevokedMarkForTheSameSignIn(t *testing.T) {
-	ls := []savedLogin{{Agent: "codex", User: "x@example.com", Auth: json.RawMessage("{\n  \"a\": 1\n}"), Lapsed: revokedText("x@example.com"), Refused: revokedPrefix + "m"}}
-	same := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"a":1}`)})
+	ls := []savedLogin{{Agent: "codex", User: "x@example.com", Auth: json.RawMessage("{\n  \"tokens\": {\"access_token\":\"a\"}\n}"), Lapsed: revokedText("x@example.com"), Refused: revokedPrefix + "m"}}
+	same := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"tokens":{"access_token":"a"}}`)})
 	if len(same) != 1 || same[0].Refused != revokedPrefix+"m" || same[0].Lapsed == "" {
 		t.Fatalf("the same sign-in lost its mark: %+v", same)
 	}
-	anew := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"a":2}`)})
+	anew := upsertLogin(append([]savedLogin(nil), ls...), savedLogin{Agent: "codex", User: "x@example.com", Auth: json.RawMessage(`{"tokens":{"access_token":"b"}}`)})
 	if len(anew) != 1 || anew[0].Refused != "" || anew[0].Lapsed != "" {
 		t.Fatalf("a new sign-in kept the mark: %+v", anew)
 	}

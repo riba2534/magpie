@@ -70,6 +70,9 @@ func (p Provider) retryCodexAuth(client *http.Client, req *http.Request, res *ht
 	if !bearer || sent.token == "" || sent.accountID == "" {
 		return res, nil
 	}
+	if _, revoked := RevokedSignIn(a, req); revoked {
+		return res, nil // a permanent refresh refusal needs a new sign-in
+	}
 	body, err := req.GetBody()
 	if err != nil || body == nil {
 		return res, nil
@@ -84,7 +87,18 @@ func (p Provider) retryCodexAuth(client *http.Client, req *http.Request, res *ht
 		return res, nil
 	}
 	token, accountID, err := a.recover(req.Context(), sent)
-	if err != nil || token == "" || accountID != sent.accountID || req.Context().Err() != nil {
+	if err != nil {
+		var refused refreshRefused
+		if errors.As(err, &refused) {
+			// The model may only have said token_expired. The authority's
+			// permanent refusal is what says this sign-in is gone. Recovery
+			// has released its locks; the observer rechecks the held credential
+			// so a sign-in made while the authority answered isn't marked.
+			NoteRevokedSignIn(req.Context(), a, req)
+		}
+		return res, nil
+	}
+	if token == "" || accountID != sent.accountID || req.Context().Err() != nil {
 		return res, nil
 	}
 	retry := req.Clone(req.Context())
@@ -137,33 +151,11 @@ func keepCodexRefusalBody(res *http.Response) bool {
 // or rememberLogins would mistake that rotation for a new sign-in and
 // clear the mark immediately.
 func keepCodexRefusal(a *Account, req *http.Request, mark, why string) bool {
-	token, bearer := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
-	sent := codexSentAuth{token: token, accountID: req.Header.Get("chatgpt-account-id"), identity: a.codexIdentity}
-	if !bearer || token == "" || sent.accountID == "" {
+	sent, b, own, ok := codexHeldAuth(a, req)
+	if !ok {
 		return false
 	}
-	dir := a.codexHome
-	if dir == "" {
-		dir = codexHome()
-	}
-	b, _, err := readCodexLogin(dir, true)
-	var active codexAuth
-	own := false
-	if err == nil {
-		if json.Unmarshal(b, &active) != nil {
-			return false
-		}
-		own = sent.matches(active)
-		if own && active.Tokens.AccessToken != sent.token {
-			return false
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	if a.codexHome != "" && !own {
-		return false
-	}
-	err = editSideLogin(a.Agent, a.User, func(ls []savedLogin, i int) ([]savedLogin, error) {
+	err := editSideLogin(a.Agent, a.User, func(ls []savedLogin, i int) ([]savedLogin, error) {
 		var current codexAuth
 		if json.Unmarshal(ls[i].Auth, &current) != nil || !sent.matches(current) {
 			return nil, errUnchanged
@@ -177,4 +169,50 @@ func keepCodexRefusal(a *Account, req *http.Request, mark, why string) bool {
 		return ls, nil
 	})
 	return err == nil
+}
+
+// codexHeldAuth locates the account's current holder without refreshing.
+// savedTokenMu is held while the caller uses this snapshot to change the
+// sign-in's refusal state. A success and a refusal use the same guard.
+func codexHeldAuth(a *Account, req *http.Request) (sent codexSentAuth, auth []byte, own, ok bool) {
+	token, bearer := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+	sent = codexSentAuth{token: token, accountID: req.Header.Get("chatgpt-account-id"), identity: a.codexIdentity}
+	if !bearer || token == "" || sent.accountID == "" {
+		return sent, nil, false, false
+	}
+	dir := a.codexHome
+	if dir == "" {
+		dir = codexHome()
+	}
+	b, _, err := readCodexLogin(dir, true)
+	var active codexAuth
+	if err == nil {
+		if json.Unmarshal(b, &active) != nil {
+			return sent, nil, false, false
+		}
+		own = sent.matches(active)
+		if own && active.Tokens.AccessToken != sent.token {
+			return sent, nil, false, false
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return sent, nil, false, false
+	}
+	if a.codexHome != "" && !own {
+		return sent, nil, false, false
+	}
+	if own {
+		return sent, b, true, true
+	}
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	for _, l := range readLogins() {
+		if l.Agent != a.Agent || !strings.EqualFold(l.User, a.User) {
+			continue
+		}
+		var current codexAuth
+		if json.Unmarshal(l.Auth, &current) == nil && sent.matches(current) && current.Tokens.AccessToken == sent.token {
+			return sent, l.Auth, false, true
+		}
+	}
+	return sent, nil, false, false
 }
