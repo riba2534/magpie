@@ -4390,6 +4390,19 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if (proto == provider.Responses || proto == provider.Chat || proto == provider.Anthropic) && (grokModel(model) || grokModel(upstream)) {
 		ints = &intTidy{proto: proto, sse: sse}
 	}
+	// a message the upstream gave no phase gets one, as OpenAI's own
+	// models' do (phase.go, #2437); it goes last, as it holds events back
+	var phases *phaseTidy
+	if proto == provider.Responses {
+		phases = &phaseTidy{sse: sse}
+	}
+	// out is what a filter let through, through phases
+	out := func(b []byte) []byte {
+		if phases != nil {
+			return phases.write(b)
+		}
+		return b
+	}
 	buf := make([]byte, 32<<10)
 	var rerr error
 	for {
@@ -4418,6 +4431,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if sigs != nil {
 				out = sigs.write(out)
 			}
+			if phases != nil {
+				out = phases.write(out)
+			}
 			if _, werr := w.Write(out); werr != nil {
 				return res.StatusCode, "", true
 			}
@@ -4432,14 +4448,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	// what's held at the end goes through the filters after the one
 	// that held it
-	sign := func(out []byte) []byte {
+	sign := func(b []byte) []byte {
 		if ints != nil {
-			out = ints.write(out)
+			b = ints.write(b)
 		}
 		if sigs != nil {
-			return sigs.write(out)
+			b = sigs.write(b)
 		}
-		return out
+		return out(b)
 	}
 	if tidy != nil {
 		out := tidy.flush()
@@ -4468,14 +4484,17 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		w.Write(sign(spaces.flush()))
 	}
 	if ints != nil {
-		out := ints.flush()
+		b := ints.flush()
 		if sigs != nil {
-			out = sigs.write(out)
+			b = sigs.write(b)
 		}
-		w.Write(out)
+		w.Write(out(b))
 	}
 	if sigs != nil {
-		w.Write(sigs.flush())
+		w.Write(out(sigs.flush()))
+	}
+	if phases != nil {
+		w.Write(phases.flush())
 	}
 	if sse {
 		sniff.drain()
