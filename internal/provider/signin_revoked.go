@@ -171,7 +171,28 @@ func NoteRevokedSignIn(ctx context.Context, a *Account, req *http.Request) {
 	})
 }
 
-// ServedSignIn notes a request account a's vendor served: a mark of a
+// ServedSignInForRequest observes the credential a vendor actually served.
+// A Codex request on a token since replaced cannot clear the replacement's
+// refusal. Conversely, a served credential still held by this account can
+// clear an older mark, even when that mark names another token.
+func ServedSignInForRequest(a *Account, req *http.Request) {
+	if a == nil || a.Agent != "codex" {
+		ServedSignIn(a)
+		return
+	}
+	if req == nil || !RevokedAccount(a) || !SignInMarked(a) {
+		return
+	}
+	savedTokenMu.Lock()
+	defer savedTokenMu.Unlock()
+	if _, _, _, current := codexHeldAuth(a, req); current {
+		ServedSignIn(a)
+	}
+}
+
+// ServedSignIn clears an account's refusal after an explicit renewal or a
+// successful request from a caller that owns its credential state. HTTP
+// response observers use ServedSignInForRequest. A mark of a
 // revoked sign-in it has is gone, as the account was signed in again or
 // its sign-in refreshed.
 func ServedSignIn(a *Account) {

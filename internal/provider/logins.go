@@ -320,8 +320,16 @@ func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
 			// so does a revoked sign-in's mark (signin_revoked.go), while
 			// the credential is the same: a sign-in anew or a refresh
 			// clears it, as does a request it serves
-			if l.Lapsed == "" && strings.HasPrefix(ls[i].Refused, revokedPrefix) && sameAuth(l.Auth, ls[i].Auth) && l.Home == ls[i].Home {
-				l.Lapsed, l.Refused = ls[i].Lapsed, ls[i].Refused
+			if l.Lapsed == "" && strings.HasPrefix(ls[i].Refused, revokedPrefix) && l.Home == ls[i].Home {
+				same := sameAuth(l.Auth, ls[i].Auth)
+				if l.Agent == "codex" {
+					// Reordering auth.json or editing metadata isn't a new
+					// credential and must not revive a revoked token.
+					same = sameCodexCredential(l.Auth, ls[i].Auth)
+				}
+				if same {
+					l.Lapsed, l.Refused = ls[i].Lapsed, ls[i].Refused
+				}
 			}
 			l.On = l.On || ls[i].On
 			l.Paused = l.Paused || ls[i].Paused

@@ -1065,8 +1065,35 @@ func codexAccount(home string) (Provider, bool) {
 // sign-in (auth.json or the keychain item, codexStore.write) for Codex to
 // find.
 func codexToken(ctx context.Context, dir string) (tok, accountID string, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	// A usable credential is read without the saved-account renewal lock.
+	// Another account's keepalive can wait on the authority for 30 seconds;
+	// it must not hold up requests this account can already authenticate.
+	b, _, readErr := readCodexLogin(dir, false)
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	var se *codexStoreError
+	if errors.As(readErr, &se) {
+		return "", "", se
+	}
+	var a codexAuth
+	if readErr != nil || json.Unmarshal(b, &a) != nil || a.Tokens.AccessToken == "" {
+		return "", "", errors.New("Codex is signed out; run codex login")
+	}
+	if codexRefreshDue(a, time.Now()) == "" {
+		return a.Tokens.AccessToken, codexAccountID(a), nil
+	}
+	// Rotation still excludes a switch. Take locks in that order, then
+	// re-read: neither the store nor the credential above is authoritative
+	// after waiting for another renewal to finish.
 	savedTokenMu.Lock()
 	defer savedTokenMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	codexMu.Lock()
 	defer codexMu.Unlock()
 	return codexTokenLocked(ctx, dir, "", nil)
