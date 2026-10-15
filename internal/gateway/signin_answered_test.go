@@ -68,6 +68,22 @@ func TestRevokedSignInUsesAnsweredRequest(t *testing.T) {
 			if err != nil || string(got) != body {
 				t.Fatalf("the caller lost the refusal: %q, %v", got, err)
 			}
+			if retried {
+				// A request on the previous token can finish after the new
+				// one was refused. Its success cannot clear the new mark.
+				noteSignIn(context.Background(), p.Account, original, &http.Response{
+					StatusCode: http.StatusOK, Body: http.NoBody, Request: original,
+				})
+				if _, marked := provider.RevokedSignIn(p.Account, answered); !marked {
+					t.Error("an old credential's late success cleared the renewed credential's refusal")
+				}
+				noteSignIn(context.Background(), p.Account, answered, &http.Response{
+					StatusCode: http.StatusOK, Body: http.NoBody, Request: answered,
+				})
+				if _, marked := provider.RevokedSignIn(p.Account, answered); marked {
+					t.Error("the held credential's own success did not clear its refusal")
+				}
+			}
 		})
 	}
 }

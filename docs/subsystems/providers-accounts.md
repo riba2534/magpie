@@ -146,7 +146,9 @@ expiry within five minutes triggers renewal; without a valid expiry, a known
 `last_refresh` more than eight days old does. An unknown lifetime is not an
 expired sign-in. Refresh requests use Codex's `refresh_reason`: proactive
 expiry, scheduled renewal, unauthorized recovery or a forced import.
-Magpie's existing saved-account keepalive remains scheduled renewal.
+Magpie's existing saved-account keepalive remains scheduled renewal. An
+active account whose token needs no renewal does not wait behind another
+account's saved-token refresh.
 
 A temporary proactive refresh failure can still use an access token whose
 expiry is known to be in the future. An expired token, a forced refresh and
@@ -163,11 +165,16 @@ request's credential and user/workspace identity bind the recovery: a newly
 rotated credential can be reloaded, otherwise that account is refreshed.
 Changing accounts while the request is in flight cannot silently substitute
 the new login. The retry keeps the URL, encoded body, request context and
-application headers. If recovery cannot proceed, the original refusal stays
-available for normal gateway fallback. A repeated 401 is observed using
+application headers. A permanent refresh refusal is retained only for the
+credential still held, preventing repeated renewal of a known dead token.
+If recovery cannot proceed, the original refusal stays available for normal
+gateway fallback. A repeated 401 is observed using
 `response.Request`, so only the credential the vendor actually answered can
-be marked revoked. A direct relay of the client's own sign-in is left for
-that client to recover.
+be marked revoked. A successful answer clears a Codex mark only when its
+request used the credential still held; an old token's late success cannot
+clear a newer refusal. Remembering an unchanged credential also retains its
+mark across JSON reordering or unrelated metadata edits. A direct relay of
+the client's own sign-in is left for that client to recover.
 
 Sources: [`codex_auth.go`](../../internal/provider/codex_auth.go),
 [`codex_recovery.go`](../../internal/provider/codex_recovery.go),

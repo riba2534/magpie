@@ -105,7 +105,10 @@ caller. `passthrough` uses the same source for body preparation, signing and
 its directed retries. `PrepareFrom` does not add a second instructions
 field, remove valid input IDs, or fill parameters the client omitted.
 Standard Responses and Responses Lite therefore retain their own tools,
-reasoning, stream options, metadata and instruction layout.
+reasoning, stream options, metadata and instruction layout. Adding or removing
+a provider prefix replaces a unique string model in place, keeping the
+remaining JSON bytes and the leading routing fields. Duplicate or aliased
+model keys retain the existing canonicalization path.
 
 Model routing, explicit effort choices, redaction, existing invalid-item
 repairs and the subscription's service-tier restriction still apply. Only

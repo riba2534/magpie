@@ -48,7 +48,7 @@ func noteSignIn(ctx context.Context, a *provider.Account, req *http.Request, res
 	}
 	switch {
 	case res.StatusCode >= 200 && res.StatusCode < 300:
-		provider.ServedSignIn(a)
+		provider.ServedSignInForRequest(a, req)
 	case res.StatusCode == http.StatusUnauthorized && res.Body != nil:
 		b, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 		res.Body = readCloser{io.MultiReader(bytes.NewReader(b), res.Body), res.Body}
